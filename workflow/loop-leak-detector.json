@@ -53,14 +53,36 @@
     },
     {
       "parameters": {
-        "jsCode": "// ─────────────────────────────────────────────────────────────────────────────\n// VALIDATE CLUSTER NODE\n// Checks whether the primary cluster meets minimum thresholds for analysis.\n// Marks low-signal clusters as invalid to prevent over-interpretation.\n// ─────────────────────────────────────────────────────────────────────────────\n\nconst data = items[0].json;\nconst cluster = data.primary_cluster;\nconst thresholds = data._debug_provider_config.thresholds;\n\nlet isValid = false;\nlet invalidReason = null;\n\nif (!cluster) {\n  isValid = false;\n  invalidReason = 'No cluster found in event data';\n} else {\n  const hasEnoughRevisits = cluster.revisit_count >= thresholds.minRevisitCount;\n  const hasEnoughEdits = cluster.draft_edit_count >= thresholds.minDraftEdits;\n  const hasEnoughReopens = cluster.reopen_count >= thresholds.minReopenCount;\n  const hasEnoughDefers = cluster.defer_count >= thresholds.minDeferCount;\n  const hasEnoughEvents = cluster.total_events > thresholds.lowSignalEventCount;\n\n  if (!hasEnoughEvents) {\n    isValid = false;\n    invalidReason = `Total event count (${cluster.total_events}) is below low-signal threshold (${thresholds.lowSignalEventCount + 1})`;\n  } else if (hasEnoughRevisits || hasEnoughEdits || hasEnoughReopens || hasEnoughDefers) {\n    isValid = true;\n  } else {\n    isValid = false;\n    invalidReason = 'Cluster does not meet minimum thresholds for any loop type (revisit, draft edit, reopen, defer)';\n  }\n}\n\nreturn [\n  {\n    json: {\n      ...data,\n      cluster_is_valid: isValid,\n      cluster_invalid_reason: invalidReason,\n      _debug_stage: 'validate_cluster'\n    }\n  }\n];"
+        "jsCode": "// ─────────────────────────────────────────────────────────────────────────────\n// CLOSURE EVENT DETECTION NODE\n// Models closure events as first-class signals.\n// Closure events (send, submit, archive, discard, resolve, close-with-decision)\n// indicate that a loop has genuinely ended. Their presence significantly changes\n// severity and confidence of any loop diagnosis.\n// ─────────────────────────────────────────────────────────────────────────────\n\nconst data = items[0].json;\nconst cluster = data.primary_cluster;\n\nif (!cluster) {\n  return [{ json: { ...data, _debug_stage: 'closure_event_detection' } }];\n}\n\n// Expanded closure event vocabulary\nconst closureEventTypes = new Set([\n  'send', 'submit', 'apply', 'archive', 'discard', 'delete',\n  'resolve', 'complete', 'close', 'close_with_decision',\n  'mark_done', 'mark_complete', 'accept', 'reject', 'publish', 'deploy'\n]);\n\n// Count total closure events for this cluster\nconst closureEventCount = cluster.events\n  ? cluster.events.filter(e => closureEventTypes.has(e.event_type)).length\n  : (cluster.send_count || 0) + (cluster.submit_count || 0) + (cluster.discard_count || 0);\n\n// Identify the last closure event (if any)\nconst lastClosureEvent = cluster.events\n  ? cluster.events.filter(e => closureEventTypes.has(e.event_type)).slice(-1)[0] || null\n  : null;\n\n// Detect if the loop is likely already resolved:\n// A loop is considered resolved if the last event is a closure event\n// and no revisit events occurred after it.\nlet isLikelyResolved = false;\nif (lastClosureEvent && cluster.events) {\n  const closureTimestamp = new Date(lastClosureEvent.timestamp);\n  const eventsAfterClosure = cluster.events.filter(e => {\n    return new Date(e.timestamp) > closureTimestamp &&\n           !closureEventTypes.has(e.event_type);\n  });\n  isLikelyResolved = eventsAfterClosure.length === 0;\n}\n\n// Compute closure ratio: closures / total_events\nconst closureRatio = cluster.total_events > 0\n  ? (closureEventCount / cluster.total_events)\n  : 0;\n\nconst closureSignal = {\n  closure_event_count: closureEventCount,\n  last_closure_event: lastClosureEvent ? lastClosureEvent.event_type : null,\n  last_closure_timestamp: lastClosureEvent ? lastClosureEvent.timestamp : null,\n  is_likely_resolved: isLikelyResolved,\n  closure_ratio: parseFloat(closureRatio.toFixed(3))\n};\n\nreturn [\n  {\n    json: {\n      ...data,\n      primary_cluster: { ...cluster, closure_signal: closureSignal },\n      _debug_closure_signal: closureSignal,\n      _debug_stage: 'closure_event_detection'\n    }\n  }\n];"
+      },
+      "id": "node_closure_detection_004b",
+      "name": "Closure Event Detection",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1000, 400],
+      "notes": "Models closure events (send, submit, archive, discard, resolve, etc.) as first-class signals. Detects whether the loop is likely already resolved. Computes closure_ratio and last_closure_event for use in AI prompts and deterministic checks."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─────────────────────────────────────────────────────────────────────────────\n// SEVERITY CALIBRATION NODE\n// Adjusts the base severity weight of the primary cluster based on object_category.\n// A repeated revisit of a job listing is not the same as revisiting a meme tab.\n// This calibration informs the AI prompt and deterministic checks.\n// ─────────────────────────────────────────────────────────────────────────────\n\nconst data = items[0].json;\nconst cluster = data.primary_cluster;\n\nif (!cluster) {\n  return [{ json: { ...data, _debug_stage: 'severity_calibration' } }];\n}\n\n// Severity weight map by object_category\n// Higher weight = higher inherent stakes for the same revisit count\nconst categoryWeights = {\n  // High-stakes: consequential decisions with deadlines or external dependencies\n  'job_listing': 1.4,\n  'legal_document': 1.5,\n  'contract': 1.5,\n  'financial_document': 1.4,\n  'application': 1.4,\n  'proposal': 1.3,\n  'deadline_item': 1.4,\n  'medical_form': 1.5,\n\n  // Medium-stakes: meaningful work output\n  'email_draft': 1.2,\n  'document': 1.1,\n  'report': 1.2,\n  'presentation': 1.1,\n  'task': 1.1,\n  'project': 1.2,\n  'calendar_item': 1.0,\n\n  // Low-stakes: casual or low-consequence browsing\n  'article': 0.7,\n  'note': 0.8,\n  'reference': 0.8,\n  'bookmark': 0.7,\n  'tab': 0.7,\n  'social_post': 0.6,\n  'research_item': 0.9,\n\n  // Default for uncategorized\n  'uncategorized': 1.0\n};\n\nconst category = cluster.object_category || 'uncategorized';\nconst severityWeight = categoryWeights[category] || 1.0;\n\n// Compute a calibrated signal score for use in prompts\n// Score = (revisit_count * weight) + (draft_edit_count * 0.8) + (defer_count * 0.9)\n//         minus closure attenuation if closure events exist\nconst closureCount = cluster.closure_signal ? cluster.closure_signal.closure_event_count : 0;\nconst closureAttenuation = closureCount * 1.5;\n\nconst rawSignalScore =\n  (cluster.revisit_count * severityWeight) +\n  (cluster.draft_edit_count * 0.8) +\n  (cluster.defer_count * 0.9) -\n  closureAttenuation;\n\nconst calibratedScore = Math.max(0, parseFloat(rawSignalScore.toFixed(2)));\n\n// Map score to a calibrated_severity_hint for the AI prompt\nlet calibratedSeverityHint = 'low';\nif (calibratedScore >= 12) calibratedSeverityHint = 'critical';\nelse if (calibratedScore >= 8) calibratedSeverityHint = 'high';\nelse if (calibratedScore >= 4) calibratedSeverityHint = 'medium';\nelse if (calibratedScore >= 1) calibratedSeverityHint = 'low';\nelse calibratedSeverityHint = 'none';\n\nconst calibration = {\n  object_category: category,\n  severity_weight: severityWeight,\n  calibrated_score: calibratedScore,\n  calibrated_severity_hint: calibratedSeverityHint,\n  is_likely_resolved: cluster.closure_signal ? cluster.closure_signal.is_likely_resolved : false\n};\n\nreturn [\n  {\n    json: {\n      ...data,\n      primary_cluster: { ...cluster, severity_calibration: calibration },\n      _debug_severity_calibration: calibration,\n      _debug_stage: 'severity_calibration'\n    }\n  }\n];"
+      },
+      "id": "node_severity_calibration_004c",
+      "name": "Severity Calibration",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 400],
+      "notes": "Adjusts severity weighting by object_category before AI analysis. High-stakes objects (job listings, legal docs, contracts) receive higher severity weights. Low-stakes objects (articles, bookmarks, social posts) receive lower weights. Closure events attenuate the final score."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─────────────────────────────────────────────────────────────────────────────\n// VALIDATE CLUSTER NODE\n// Checks whether the primary cluster meets minimum thresholds for analysis.\n// Marks low-signal clusters as invalid to prevent over-interpretation.\n// Also short-circuits clusters already marked is_likely_resolved.\n// ─────────────────────────────────────────────────────────────────────────────\n\nconst data = items[0].json;\nconst cluster = data.primary_cluster;\nconst thresholds = data._debug_provider_config.thresholds;\n\nlet isValid = false;\nlet invalidReason = null;\n\nif (!cluster) {\n  isValid = false;\n  invalidReason = 'No cluster found in event data';\n} else if (cluster.closure_signal && cluster.closure_signal.is_likely_resolved) {\n  // Loop has a closure event and no revisits occurred after it — treat as resolved\n  isValid = false;\n  invalidReason = `Loop appears resolved: last closure event was '${cluster.closure_signal.last_closure_event}' at ${cluster.closure_signal.last_closure_timestamp} with no subsequent revisits`;\n} else {\n  const hasEnoughRevisits = cluster.revisit_count >= thresholds.minRevisitCount;\n  const hasEnoughEdits = cluster.draft_edit_count >= thresholds.minDraftEdits;\n  const hasEnoughReopens = cluster.reopen_count >= thresholds.minReopenCount;\n  const hasEnoughDefers = cluster.defer_count >= thresholds.minDeferCount;\n  const hasEnoughEvents = cluster.total_events > thresholds.lowSignalEventCount;\n\n  if (!hasEnoughEvents) {\n    isValid = false;\n    invalidReason = `Total event count (${cluster.total_events}) is below low-signal threshold (${thresholds.lowSignalEventCount + 1})`;\n  } else if (hasEnoughRevisits || hasEnoughEdits || hasEnoughReopens || hasEnoughDefers) {\n    isValid = true;\n  } else {\n    isValid = false;\n    invalidReason = 'Cluster does not meet minimum thresholds for any loop type (revisit, draft edit, reopen, defer)';\n  }\n}\n\nreturn [\n  {\n    json: {\n      ...data,\n      cluster_is_valid: isValid,\n      cluster_invalid_reason: invalidReason,\n      _debug_stage: 'validate_cluster'\n    }\n  }\n];"
       },
       "id": "node_validate_cluster_005",
       "name": "Validate Cluster",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1120, 400],
-      "notes": "Validates the primary cluster against configured thresholds. Low-signal or empty clusters are marked invalid and short-circuited before reaching the AI node."
+      "position": [1260, 400],
+      "notes": "Validates the primary cluster against configured thresholds. Also short-circuits clusters already marked as resolved by the Closure Event Detection node. Low-signal or resolved clusters are short-circuited before reaching AI."
     },
     {
       "parameters": {
@@ -322,6 +344,28 @@
       "main": [
         [
           {
+            "node": "Closure Event Detection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Closure Event Detection": {
+      "main": [
+        [
+          {
+            "node": "Severity Calibration",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Severity Calibration": {
+      "main": [
+        [
+          {
             "node": "Validate Cluster",
             "type": "main",
             "index": 0
@@ -520,5 +564,5 @@
     "instanceId": "REPLACE_WITH_YOUR_INSTANCE_ID"
   },
   "id": "loop-leak-detector-automation-v1",
-  "versionId": "1.0.0"
+  "versionId": "1.1.0"
 }
