@@ -16,6 +16,53 @@ This guide covers all supported customization points in order of frequency of us
 
 ---
 
+## 0. Critical: Prompt File Synchronization
+
+> **This is the most important customization warning in this guide. Read it before editing any prompt.**
+
+The `prompts/` directory contains the canonical prompt files:
+- `prompts/system-loop-analysis.md`
+- `prompts/user-loop-analysis-template.md`
+- `prompts/system-weekly-pattern-review.md`
+- `prompts/user-weekly-pattern-review-template.md`
+
+**However, the workflow nodes do NOT load these files at runtime.**
+
+The `Prep Loop Analysis Request` and `Prep Weekly Pattern Review` nodes contain **inline copies** of the prompt text embedded directly as string literals in their JavaScript code. This is because n8n Code nodes do not have native access to the local filesystem at execution time.
+
+This creates a **divergence risk**: if you edit the `.md` file but not the matching inline string in the Code node (or vice versa), the files and the running workflow will be out of sync. The `.md` files serve as the source-of-truth documentation, but the Code node strings are what actually execute.
+
+### Rule: Always Update Both
+
+Whenever you change a system or user prompt:
+
+1. Edit the `.md` file in `prompts/` first (this is your source of truth).
+2. Copy the updated text into the matching Code node's inline string in n8n.
+3. Save the Code node.
+4. Test with a sample payload to confirm the change is live.
+
+### How to Load Prompt Files Dynamically (Advanced)
+
+If you want to avoid maintaining duplicate copies, you have two options in n8n:
+
+**Option A — n8n Read/Write Files node (self-hosted only):**
+Insert an `n8n-nodes-base.readBinaryFiles` node before the Prep node. Configure it to read `prompts/system-loop-analysis.md` from the n8n working directory. Then extract the file content in the Prep node:
+```javascript
+const systemPrompt = $('Read Prompt File').first().binary.data.toString('utf-8');
+```
+This only works on self-hosted n8n instances with filesystem access enabled.
+
+**Option B — Environment variable injection:**
+Store the prompt text as an environment variable in your n8n instance (e.g., `LOOP_ANALYSIS_SYSTEM_PROMPT`). Access it in the Code node:
+```javascript
+const systemPrompt = process.env.LOOP_ANALYSIS_SYSTEM_PROMPT || 'fallback prompt text';
+```
+This is the most portable approach and works on both self-hosted and n8n Cloud.
+
+Until you implement one of the above, treat the inline string in the Code node as the live prompt and keep the `.md` file in sync manually.
+
+---
+
 ## 1. Changing the AI Provider or Model
 
 **Where:** `Provider Config` node

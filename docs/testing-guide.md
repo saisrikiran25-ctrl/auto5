@@ -331,18 +331,34 @@ Send any valid payload.
 
 Submit a payload with `analysis_mode: weekly_review` and enough events to produce a valid cluster.
 
+### Important: Scope of Weekly Review in This Workflow
+
+> **The `weekly_review` mode in this workflow is a multi-cluster review of a single payload — not a cross-session aggregate across multiple past invocations.**
+
+This is a known scope constraint documented in the Limitations section. When `analysis_mode` is set to `weekly_review`, the `Prep Weekly Pattern Review` node synthesizes analysis across all clusters found in the current payload's `all_clusters` list. It does not pull from previous workflow executions or a database of past results.
+
+**What this means in practice:**
+- If your payload contains events for 3 different objects, the weekly review will synthesize across all 3 clusters.
+- If your payload contains events for only 1 object (like the Test 1 payload), the "weekly review" is effectively a single-cluster summary.
+- To get a true multi-week or multi-session review, aggregate events from multiple time periods into a single payload before sending.
+
+This is intentional for the current version — the workflow is stateless by default. To enable cross-session weekly reviews, connect the workflow to a database and aggregate stored loop results into the payload.
+
 ### Input Payload
 
-Use the same payload as Test 1 but change:
+Use the sample payload from `schemas/activity-input-payload-example.json` (which contains events for two distinct objects) but change:
 ```json
 "analysis_mode": "weekly_review"
 ```
+
+Or use Test 1's payload and note that the weekly review will summarize a single cluster only.
 
 ### Expected Behavior
 
 | Stage | Expected |
 |---|---|
 | If Weekly Review | Routes to Prep Weekly Pattern Review |
+| Prep Weekly Pattern Review | Builds prompt using all_clusters from the payload |
 | AI: Weekly Pattern Review | Called with weekly synthesis prompt |
 | Parse Weekly Pattern Review | Returns weekly review JSON |
 | Final Response | Includes both `loop_analysis` and `weekly_review` fields |
@@ -353,3 +369,59 @@ Use the same payload as Test 1 but change:
 - `weekly_review.top_loop_leaks` is an array
 - `weekly_review.next_week_interventions` contains at least one item
 - No `_debug_` fields in response
+- If only one cluster was in the payload, `weekly_review.confidence_band` should be `low` (single-result scope)
+
+---
+
+## Test 8: Closure Event Short-Circuit
+
+### Scenario
+
+An object has been revisited multiple times but ends with a clear closure event (`apply`, `submit`, `send`) as its final event — with no subsequent revisits. The workflow should detect the loop as resolved and skip AI analysis.
+
+### Input Payload
+
+```json
+{
+  "user_id": "test_user_008",
+  "analysis_mode": "single_loop",
+  "time_window_start": "2025-01-06T09:00:00Z",
+  "time_window_end": "2025-01-12T23:59:59Z",
+  "preferred_tone": "direct",
+  "events": [
+    {"timestamp": "2025-01-06T09:15:00Z", "source": "browser", "event_type": "tab_open", "object_name": "Senior PM - Acme Corp", "object_category": "job_listing", "session_id": "sess_001"},
+    {"timestamp": "2025-01-07T14:30:00Z", "source": "browser", "event_type": "tab_open", "object_name": "Senior PM - Acme Corp", "object_category": "job_listing", "session_id": "sess_002"},
+    {"timestamp": "2025-01-08T10:45:00Z", "source": "browser", "event_type": "tab_open", "object_name": "Senior PM - Acme Corp", "object_category": "job_listing", "session_id": "sess_003"},
+    {"timestamp": "2025-01-09T11:00:00Z", "source": "application_portal", "event_type": "submit", "object_name": "Senior PM - Acme Corp", "object_category": "job_listing", "session_id": "sess_004"}
+  ]
+}
+```
+
+Note: The final event is `submit` with no further revisits after it.
+
+### Expected Behavior
+
+| Stage | Expected |
+|---|---|
+| Cluster Repeated Behavior | revisit_count=3, submit_count=1 |
+| Closure Event Detection | `is_likely_resolved: true` (submit is last event, no revisits after it) |
+| Validate Cluster | `cluster_is_valid: false` — short-circuited due to `is_likely_resolved` |
+| If Valid | Routes to Low Signal Response |
+| AI nodes | NOT called |
+| Final Response | Returns structured response citing loop as resolved |
+
+### Expected Output Fields
+
+```json
+{
+  "loop_type": "low_signal_noise",
+  "review_reason": "Loop appears resolved: last closure event was 'submit' at ... with no subsequent revisits"
+}
+```
+
+### Pass Criteria
+
+- AI nodes are NOT called for a resolved loop (no API cost)
+- `cluster_invalid_reason` in the internal log references `is_likely_resolved`
+- The response correctly classifies this as non-actionable (loop has closed)
+- This test confirms the Closure Event Detection node is functioning

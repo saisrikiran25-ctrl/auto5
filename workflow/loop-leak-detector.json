@@ -536,7 +536,7 @@
     "executionOrder": "v1",
     "saveManualExecutions": true,
     "callerPolicy": "workflowsFromSameOwner",
-    "errorWorkflow": ""
+    "errorWorkflow": "YOUR_ERROR_WORKFLOW_ID_OR_LEAVE_BLANK"
   },
   "staticData": null,
   "tags": [
@@ -561,8 +561,10 @@
   ],
   "meta": {
     "templateCredsSetupCompleted": false,
-    "instanceId": "REPLACE_WITH_YOUR_INSTANCE_ID"
+    "instanceId": "REPLACE_WITH_YOUR_INSTANCE_ID",
+    "_instanceId_note": "Set this to your n8n instance ID. Found in n8n Settings > About. See docs/setup-guide.md Step 0.",
+    "_errorWorkflow_note": "errorWorkflow is intentionally blank. To receive error notifications, create a separate error-handler workflow in n8n and paste its ID into settings.errorWorkflow. See docs/setup-guide.md Troubleshooting."
   },
   "id": "loop-leak-detector-automation-v1",
-  "versionId": "1.1.0"
+  "versionId": "1.2.0"
 }

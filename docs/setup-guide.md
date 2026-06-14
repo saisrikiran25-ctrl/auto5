@@ -16,12 +16,60 @@ Before beginning setup, ensure you have:
 
 ---
 
+## Step 0: Configure Workflow Metadata (Before Import)
+
+Before importing, open `workflow/loop-leak-detector.json` in a text editor and update these two fields:
+
+### Update `meta.instanceId`
+
+Locate the `meta` block near the bottom of the JSON:
+
+```json
+"meta": {
+  "templateCredsSetupCompleted": false,
+  "instanceId": "REPLACE_WITH_YOUR_INSTANCE_ID"
+}
+```
+
+Replace `REPLACE_WITH_YOUR_INSTANCE_ID` with your actual n8n instance ID.
+
+To find your instance ID in n8n:
+1. Go to **Settings → About** in your n8n instance.
+2. Copy the **Instance ID** value shown.
+3. Paste it into the `instanceId` field in the workflow JSON.
+
+If you leave this blank or use the placeholder, the workflow will still import and run correctly — but workflow templates with matching instance IDs integrate better with n8n Cloud and backup/restore features.
+
+### Configure `settings.errorWorkflow` (Optional but Recommended)
+
+Locate the `settings` block:
+
+```json
+"settings": {
+  "executionOrder": "v1",
+  "saveManualExecutions": true,
+  "callerPolicy": "workflowsFromSameOwner",
+  "errorWorkflow": "YOUR_ERROR_WORKFLOW_ID_OR_LEAVE_BLANK"
+}
+```
+
+The `errorWorkflow` field is **intentionally left as a placeholder**. If it is empty or contains the placeholder string, n8n will silently swallow any unhandled execution errors — they will not produce notifications or alerts.
+
+To enable error notifications:
+1. Create a separate n8n workflow that handles error events (e.g., sends a Slack message or email).
+2. Copy that workflow's ID from its URL (`/workflow/THE_ID_HERE`).
+3. Paste the ID into `settings.errorWorkflow` before importing.
+
+If you choose not to configure this, unhandled errors will be visible in the n8n execution history log but will not trigger any alert.
+
+---
+
 ## Step 1: Import the Workflow
 
 1. Open your n8n instance in a browser.
 2. Navigate to **Workflows** in the left sidebar.
 3. Click **+ Add Workflow** → **Import from File**.
-4. Select `workflow/loop-leak-detector.json` from this repository.
+4. Select `workflow/loop-leak-detector.json` from this repository (after completing Step 0).
 5. Click **Import**.
 
 The workflow will appear in your workflow list as **Loop Leak Detector Automation**.
@@ -200,6 +248,19 @@ Verify that:
 
 - Confirm `analysis_mode` is set to `"weekly_review"` in your input payload.
 - The weekly review branch only activates when the If Weekly Review node condition is true.
+
+---
+
+### Errors occur but no notification arrives
+
+The `errorWorkflow` field in the workflow JSON is intentionally left as a placeholder. An empty or placeholder value means n8n silently records the error in the execution history but sends no alert.
+
+To enable error notifications after import:
+1. In the n8n UI, open the Loop Leak Detector workflow.
+2. Click the **Settings** (gear) icon in the top-right of the editor.
+3. Under **Error Workflow**, select or paste your error-handler workflow ID.
+
+Or edit `settings.errorWorkflow` in the workflow JSON before import (see Step 0).
 
 ---
 
