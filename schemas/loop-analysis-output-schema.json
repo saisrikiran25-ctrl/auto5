@@ -1,0 +1,171 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Loop Analysis Output Schema",
+  "description": "Defines the expected JSON output contract for a single-loop behavioral friction analysis produced by the Loop Leak Detector Automation.",
+  "type": "object",
+  "required": [
+    "loop_summary",
+    "loop_type",
+    "friction_category",
+    "severity_level",
+    "estimated_attention_leak",
+    "supporting_patterns",
+    "likely_blocker",
+    "recommended_intervention",
+    "recommended_next_step",
+    "confidence_band",
+    "needs_human_review"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "loop_summary": {
+      "type": "string",
+      "description": "One to two factual sentences describing the observed behavioral pattern. No psychological inference beyond what the event data directly supports.",
+      "minLength": 10,
+      "maxLength": 500,
+      "examples": [
+        "The object 'Senior Product Manager - Acme Corp' was opened 7 times across 6 separate sessions in a 7-day window with no application, discard, or commitment action recorded.",
+        "The draft 'Q1 Report' was edited 5 times across 4 sessions with no send or submit event observed."
+      ]
+    },
+    "loop_type": {
+      "type": "string",
+      "description": "Classified type of the detected behavioral loop.",
+      "enum": [
+        "reopen_loop",
+        "draft_churn_loop",
+        "revisit_without_commitment",
+        "defer_reopen_cycle",
+        "research_spiral",
+        "context_switch_drag",
+        "low_signal_noise",
+        "unresolved_open_loop"
+      ]
+    },
+    "friction_category": {
+      "type": "string",
+      "description": "The most likely category of friction or blocker driving the loop pattern.",
+      "enum": [
+        "decision_avoidance",
+        "unclear_next_action",
+        "perfectionism_stall",
+        "dependency_block",
+        "priority_conflict",
+        "context_overload",
+        "insufficient_data",
+        "other"
+      ]
+    },
+    "severity_level": {
+      "type": "string",
+      "description": "Estimated severity of the attention leak created by this loop.",
+      "enum": [
+        "none",
+        "low",
+        "medium",
+        "high",
+        "critical"
+      ]
+    },
+    "estimated_attention_leak": {
+      "type": "string",
+      "description": "Estimated magnitude of attention being consumed by this recurring loop.",
+      "enum": [
+        "negligible",
+        "low",
+        "moderate",
+        "high",
+        "severe"
+      ]
+    },
+    "supporting_patterns": {
+      "type": "array",
+      "description": "Array of short factual observations drawn directly from the event data that support the loop classification.",
+      "items": {
+        "type": "string",
+        "description": "One factual observation. No interpretation or psychological inference.",
+        "examples": [
+          "7 open events across 6 separate sessions",
+          "0 submit or apply events recorded",
+          "1 defer event on day 4 followed by resumed revisit",
+          "Consistent cross-session recurrence over 7 days"
+        ]
+      },
+      "minItems": 0,
+      "maxItems": 8
+    },
+    "likely_blocker": {
+      "type": ["string", "null"],
+      "description": "The most probable friction cause based strictly on the event data. Null if the data does not support a specific inference.",
+      "examples": [
+        "Unclear application criteria or unresolved uncertainty about fit",
+        "No defined send threshold — draft is refined without a closure condition",
+        null
+      ]
+    },
+    "recommended_intervention": {
+      "type": "string",
+      "description": "One specific, actionable intervention directly tied to the loop type and friction category. Not generic advice.",
+      "minLength": 10,
+      "maxLength": 400,
+      "examples": [
+        "Define a binary apply/discard rule based on one specific criterion before the next open",
+        "Set a word-count limit or send-by date to create a forcing function for the draft"
+      ]
+    },
+    "recommended_next_step": {
+      "type": "string",
+      "description": "The single smallest useful move available to interrupt the loop right now.",
+      "minLength": 5,
+      "maxLength": 300,
+      "examples": [
+        "Open the listing one final time with a preset 5-minute decision timer",
+        "Set the draft to send tomorrow morning regardless of current state"
+      ]
+    },
+    "confidence_band": {
+      "type": "string",
+      "description": "Confidence level of the analysis based on event count, time window coverage, and pattern clarity.",
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    "needs_human_review": {
+      "type": "boolean",
+      "description": "True if the pattern is ambiguous, contradictory, borderline, required significant assumption, or has critical severity. False otherwise."
+    },
+    "review_reason": {
+      "type": ["string", "null"],
+      "description": "Required if needs_human_review is true. Explains what triggered the review flag. Null if needs_human_review is false.",
+      "examples": [
+        "Critical severity flagged — human review recommended before acting on this result",
+        "JSON parse failure — model output could not be validated",
+        null
+      ]
+    }
+  },
+  "examples": [
+    {
+      "loop_summary": "The object 'Senior Product Manager - Acme Corp' was opened 7 times across 6 separate sessions in a 7-day window with no application, discard, or commitment action recorded.",
+      "loop_type": "revisit_without_commitment",
+      "friction_category": "decision_avoidance",
+      "severity_level": "medium",
+      "estimated_attention_leak": "moderate",
+      "supporting_patterns": [
+        "7 open events across 6 separate sessions",
+        "1 defer event on day 4 with subsequent resumption of revisit",
+        "0 application or submit events",
+        "0 discard events",
+        "Consistent cross-session recurrence over 7 days"
+      ],
+      "likely_blocker": "Unclear application criteria or unresolved uncertainty about fit",
+      "recommended_intervention": "Define a binary apply/discard rule based on one specific criterion before the next open",
+      "recommended_next_step": "Open the listing one final time with a preset 5-minute decision timer",
+      "confidence_band": "medium",
+      "needs_human_review": false,
+      "review_reason": null
+    }
+  ]
+}

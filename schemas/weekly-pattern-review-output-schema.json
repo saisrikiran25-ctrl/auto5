@@ -1,0 +1,203 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Weekly Pattern Review Output Schema",
+  "description": "Defines the expected JSON output contract for a weekly behavioral friction pattern review synthesized from multiple single-loop analysis results.",
+  "type": "object",
+  "required": [
+    "review_summary",
+    "top_loop_leaks",
+    "repeated_friction_categories",
+    "recurring_blockers",
+    "quick_closure_opportunities",
+    "highest_severity_patterns",
+    "next_week_interventions",
+    "confidence_band",
+    "needs_human_review"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "review_summary": {
+      "type": "string",
+      "description": "Two to four factual sentences summarizing the week's behavioral friction picture. No encouragement or emotional framing. States what patterns were observed and how severe they were.",
+      "minLength": 20,
+      "maxLength": 800,
+      "examples": [
+        "Three distinct loop leaks were identified in the review period. Decision avoidance was the dominant friction category across 3 of 5 analyzed loops. The highest-severity pattern involved repeated revisit of a job listing across 6 sessions with no closure action. One quick closure opportunity was identified involving a low-revisit task item."
+      ]
+    },
+    "top_loop_leaks": {
+      "type": "array",
+      "description": "The top loop leaks by severity level for the review period. Ordered by severity descending.",
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "required": ["object_name", "loop_type", "severity_level", "summary"],
+        "additionalProperties": false,
+        "properties": {
+          "object_name": {
+            "type": "string",
+            "description": "Name or title of the digital object at the center of the loop."
+          },
+          "loop_type": {
+            "type": "string",
+            "description": "The classified loop type from the single-loop analysis.",
+            "enum": [
+              "reopen_loop",
+              "draft_churn_loop",
+              "revisit_without_commitment",
+              "defer_reopen_cycle",
+              "research_spiral",
+              "context_switch_drag",
+              "low_signal_noise",
+              "unresolved_open_loop"
+            ]
+          },
+          "severity_level": {
+            "type": "string",
+            "description": "Severity level from the single-loop analysis result.",
+            "enum": ["none", "low", "medium", "high", "critical"]
+          },
+          "summary": {
+            "type": "string",
+            "description": "One factual sentence summarizing this loop leak.",
+            "minLength": 10,
+            "maxLength": 300
+          }
+        }
+      }
+    },
+    "repeated_friction_categories": {
+      "type": "array",
+      "description": "Friction categories that appeared in two or more single-loop analysis results for this review period.",
+      "items": {
+        "type": "string",
+        "enum": [
+          "decision_avoidance",
+          "unclear_next_action",
+          "perfectionism_stall",
+          "dependency_block",
+          "priority_conflict",
+          "context_overload",
+          "insufficient_data",
+          "other"
+        ]
+      },
+      "uniqueItems": true
+    },
+    "recurring_blockers": {
+      "type": "array",
+      "description": "Blocker descriptions that recurred across two or more single-loop analysis results. Empty array if no recurring blockers exist.",
+      "items": {
+        "type": "string",
+        "description": "One sentence describing the recurring blocker.",
+        "examples": [
+          "Unclear application criteria appeared in 3 loop results",
+          "No defined send threshold observed across 2 draft-related loops"
+        ]
+      }
+    },
+    "quick_closure_opportunities": {
+      "type": "array",
+      "description": "Patterns or objects where a simple next action is likely to produce closure based on the loop analysis data. Empty array if no quick closures are apparent.",
+      "items": {
+        "type": "string",
+        "description": "One sentence describing the closure opportunity.",
+        "examples": [
+          "Task 'Schedule dentist appointment' has 2 revisits and a clear next action — schedule the call",
+          "Draft 'Thank you note - interview' has 1 edit and no blocker — send or discard"
+        ]
+      }
+    },
+    "highest_severity_patterns": {
+      "type": "array",
+      "description": "Descriptions of the highest-severity behavioral patterns identified in the review period. Ordered by severity descending.",
+      "items": {
+        "type": "string",
+        "description": "One factual sentence describing the high-severity pattern.",
+        "examples": [
+          "Job listing 'Senior PM - Acme Corp' has been revisited 7 times across 6 sessions with no closure",
+          "Draft cover letter has 4 edits across 4 sessions with 0 send events"
+        ]
+      }
+    },
+    "next_week_interventions": {
+      "type": "array",
+      "description": "Specific, actionable interventions recommended for the next period. Each tied to a specific pattern or friction category. Not generic advice. Maximum 5 entries.",
+      "maxItems": 5,
+      "items": {
+        "type": "string",
+        "description": "One specific intervention. Tied to an identified pattern.",
+        "examples": [
+          "Apply or discard 'Senior PM - Acme Corp' listing within the first session of next week",
+          "Set a word-count limit and send-by date for all active email drafts",
+          "For recurring defer cycles: require a concrete dependency name before deferring again"
+        ]
+      }
+    },
+    "confidence_band": {
+      "type": "string",
+      "description": "Overall confidence level for the weekly review synthesis.",
+      "enum": ["low", "medium", "high"]
+    },
+    "needs_human_review": {
+      "type": "boolean",
+      "description": "True if multiple loop results flagged needs_human_review, a critical severity pattern is present with no clear intervention, or the data is sparse or contradictory."
+    },
+    "review_reason": {
+      "type": ["string", "null"],
+      "description": "Required if needs_human_review is true. Null otherwise.",
+      "examples": [
+        "3 of 5 loop results flagged needs_human_review — human validation recommended before acting on weekly recommendations",
+        null
+      ]
+    }
+  },
+  "examples": [
+    {
+      "review_summary": "Three distinct loop leaks were identified in the review period. Decision avoidance was the dominant friction category across 3 of 5 analyzed loops. The highest-severity pattern involved repeated revisit of a job listing across 6 sessions with no closure action. One quick closure opportunity was identified involving a low-revisit task item.",
+      "top_loop_leaks": [
+        {
+          "object_name": "Senior Product Manager - Acme Corp",
+          "loop_type": "revisit_without_commitment",
+          "severity_level": "medium",
+          "summary": "Revisited 7 times across 6 sessions with no application or discard event."
+        },
+        {
+          "object_name": "Draft Cover Letter - Q1 Applications",
+          "loop_type": "draft_churn_loop",
+          "severity_level": "medium",
+          "summary": "Edited 4 times across 4 sessions with 0 send events recorded."
+        },
+        {
+          "object_name": "Q4 Retrospective Notes",
+          "loop_type": "reopen_loop",
+          "severity_level": "low",
+          "summary": "Reopened 3 times across 3 sessions with no edit or share event."
+        }
+      ],
+      "repeated_friction_categories": [
+        "decision_avoidance",
+        "perfectionism_stall"
+      ],
+      "recurring_blockers": [
+        "Unclear criteria for commitment action appeared in 2 loop results",
+        "No defined send or completion threshold observed in 2 draft-related loops"
+      ],
+      "quick_closure_opportunities": [
+        "Task 'Schedule dentist appointment' has 2 revisits and a clear next action — make the call"
+      ],
+      "highest_severity_patterns": [
+        "Job listing 'Senior PM - Acme Corp' revisited 7 times across 6 sessions with no closure",
+        "Draft cover letter edited 4 times with no send event across 4 sessions"
+      ],
+      "next_week_interventions": [
+        "Apply or discard the 'Senior PM - Acme Corp' listing within the first session of next week",
+        "Set a send-by date for the draft cover letter — no further edits after that date",
+        "For all deferred items: require a named blocker before deferring again"
+      ],
+      "confidence_band": "medium",
+      "needs_human_review": false,
+      "review_reason": null
+    }
+  ]
+}

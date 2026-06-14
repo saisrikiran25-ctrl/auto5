@@ -1,0 +1,524 @@
+{
+  "name": "Loop Leak Detector Automation",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "loop-leak-detector",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": false
+        }
+      },
+      "id": "node_webhook_001",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [240, 400],
+      "webhookId": "loop-leak-detector-webhook",
+      "notes": "Entry point for the automation. Accepts POST requests with an activity payload. See schemas/activity-input-payload-example.json for the expected input structure."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─────────────────────────────────────────────────────────────────────────────\n// PROVIDER CONFIG NODE\n// Configure your AI provider endpoint, model, and credential reference here.\n// Do NOT hardcode real API keys. Use n8n credentials instead.\n// ─────────────────────────────────────────────────────────────────────────────\n\nconst config = {\n  // Replace with your provider's chat completions endpoint\n  apiUrl: 'https://api.openai.com/v1/chat/completions',\n\n  // Replace with your desired model identifier\n  model: 'gpt-4o',\n\n  // n8n credential name (HTTP Header Auth) — set up in n8n Credentials panel\n  credentialName: 'YOUR_CREDENTIAL_NAME_HERE',\n\n  // Request settings\n  maxTokens: 1024,\n  temperature: 0.2,\n\n  // Retry settings for AI request nodes\n  retryOnFail: true,\n  maxTries: 3,\n  waitBetweenTries: 2000,\n\n  // Clustering thresholds (deterministic layer)\n  thresholds: {\n    minRevisitCount: 3,\n    minDraftEdits: 3,\n    minReopenCount: 2,\n    minDeferCount: 2,\n    lowSignalEventCount: 2\n  }\n};\n\nreturn [\n  {\n    json: {\n      ...items[0].json,\n      _debug_provider_config: config,\n      _debug_stage: 'provider_config'\n    }\n  }\n];"
+      },
+      "id": "node_provider_config_002",
+      "name": "Provider Config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 400],
+      "notes": "CONFIGURE THIS NODE: Set your apiUrl, model, and credentialName. Do not hardcode API keys. Use n8n HTTP Header Auth credentials. Adjust clustering thresholds as needed."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─────────────────────────────────────────────────────────────────────────────\n// NORMALIZE EVENTS NODE\n// Validates and normalizes the incoming activity payload.\n// Ensures all required fields are present and formats event data.\n// ─────────────────────────────────────────────────────────────────────────────\n\nconst payload = items[0].json;\nconst config = payload._debug_provider_config;\n\n// Validate required top-level fields\nconst required = ['user_id', 'analysis_mode', 'time_window_start', 'time_window_end', 'events'];\nconst missing = required.filter(f => !payload[f]);\n\nif (missing.length > 0) {\n  throw new Error(`Missing required fields: ${missing.join(', ')}`);\n}\n\nif (!Array.isArray(payload.events) || payload.events.length === 0) {\n  throw new Error('events must be a non-empty array');\n}\n\n// Normalize each event\nconst normalizedEvents = payload.events.map((evt, idx) => {\n  if (!evt.timestamp || !evt.source || !evt.event_type || !evt.object_name) {\n    throw new Error(`Event at index ${idx} is missing required fields (timestamp, source, event_type, object_name)`);\n  }\n  return {\n    timestamp: evt.timestamp,\n    source: evt.source.toLowerCase().trim(),\n    event_type: evt.event_type.toLowerCase().trim(),\n    object_name: evt.object_name.trim(),\n    object_category: (evt.object_category || 'uncategorized').toLowerCase().trim(),\n    session_id: evt.session_id || `session_auto_${idx}`\n  };\n});\n\n// Sort events by timestamp ascending\nnormalizedEvents.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));\n\nreturn [\n  {\n    json: {\n      user_id: payload.user_id,\n      analysis_mode: payload.analysis_mode || 'single_loop',\n      time_window_start: payload.time_window_start,\n      time_window_end: payload.time_window_end,\n      preferred_tone: payload.preferred_tone || 'direct',\n      events: normalizedEvents,\n      event_count: normalizedEvents.length,\n      _debug_provider_config: config,\n      _debug_stage: 'normalize_events',\n      _debug_normalization_passed: true\n    }\n  }\n];"
+      },
+      "id": "node_normalize_events_003",
+      "name": "Normalize Events",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 400],
+      "notes": "Validates required fields, normalizes event structure, and sorts events chronologically. Throws on missing required fields."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─────────────────────────────────────────────────────────────────────────────\n// CLUSTER REPEATED BEHAVIOR NODE\n// Groups events by object_name + object_category.\n// Counts opens, edits, revisits, defers, sends, submits per object.\n// Identifies the primary object cluster for analysis.\n// ─────────────────────────────────────────────────────────────────────────────\n\nconst data = items[0].json;\nconst events = data.events;\nconst thresholds = data._debug_provider_config.thresholds;\n\n// Group events by object_name + object_category\nconst clusters = {};\n\nfor (const evt of events) {\n  const key = `${evt.object_name}::${evt.object_category}`;\n  if (!clusters[key]) {\n    clusters[key] = {\n      object_name: evt.object_name,\n      object_category: evt.object_category,\n      events: [],\n      sessions: new Set(),\n      event_type_counts: {}\n    };\n  }\n  clusters[key].events.push(evt);\n  clusters[key].sessions.add(evt.session_id);\n  const et = evt.event_type;\n  clusters[key].event_type_counts[et] = (clusters[key].event_type_counts[et] || 0) + 1;\n}\n\n// Compute derived counts per cluster\nconst clusterList = Object.values(clusters).map(c => {\n  const etc = c.event_type_counts;\n  return {\n    object_name: c.object_name,\n    object_category: c.object_category,\n    total_events: c.events.length,\n    unique_sessions: c.sessions.size,\n    revisit_count: (etc['tab_open'] || 0) + (etc['item_open'] || 0) + (etc['file_open'] || 0) + (etc['reopen'] || 0),\n    draft_edit_count: (etc['draft_edit'] || 0) + (etc['file_edit'] || 0) + (etc['edit'] || 0),\n    reopen_count: etc['reopen'] || 0,\n    defer_count: (etc['defer'] || 0) + (etc['snooze'] || 0) + (etc['postpone'] || 0),\n    send_count: etc['send'] || 0,\n    submit_count: (etc['submit'] || 0) + (etc['apply'] || 0),\n    discard_count: (etc['discard'] || 0) + (etc['delete'] || 0) + (etc['archive'] || 0),\n    event_type_counts: etc,\n    first_seen: c.events[0].timestamp,\n    last_seen: c.events[c.events.length - 1].timestamp,\n    event_timeline: c.events.map(e => `[${e.timestamp}] ${e.event_type} (${e.source}, session: ${e.session_id})`)\n  };\n});\n\n// Sort clusters by total_events descending, then by unique_sessions descending\nclusterList.sort((a, b) => b.total_events - a.total_events || b.unique_sessions - a.unique_sessions);\n\n// Select the primary cluster (highest signal)\nconst primaryCluster = clusterList[0] || null;\n\nreturn [\n  {\n    json: {\n      ...data,\n      primary_cluster: primaryCluster,\n      all_clusters: clusterList,\n      cluster_count: clusterList.length,\n      _debug_stage: 'cluster_repeated_behavior'\n    }\n  }\n];"
+      },
+      "id": "node_cluster_behavior_004",
+      "name": "Cluster Repeated Behavior",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 400],
+      "notes": "Groups events by object_name + object_category. Counts revisits, edits, reopens, defers, sends, submits, discards. Selects the primary cluster by highest event volume."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─────────────────────────────────────────────────────────────────────────────\n// VALIDATE CLUSTER NODE\n// Checks whether the primary cluster meets minimum thresholds for analysis.\n// Marks low-signal clusters as invalid to prevent over-interpretation.\n// ─────────────────────────────────────────────────────────────────────────────\n\nconst data = items[0].json;\nconst cluster = data.primary_cluster;\nconst thresholds = data._debug_provider_config.thresholds;\n\nlet isValid = false;\nlet invalidReason = null;\n\nif (!cluster) {\n  isValid = false;\n  invalidReason = 'No cluster found in event data';\n} else {\n  const hasEnoughRevisits = cluster.revisit_count >= thresholds.minRevisitCount;\n  const hasEnoughEdits = cluster.draft_edit_count >= thresholds.minDraftEdits;\n  const hasEnoughReopens = cluster.reopen_count >= thresholds.minReopenCount;\n  const hasEnoughDefers = cluster.defer_count >= thresholds.minDeferCount;\n  const hasEnoughEvents = cluster.total_events > thresholds.lowSignalEventCount;\n\n  if (!hasEnoughEvents) {\n    isValid = false;\n    invalidReason = `Total event count (${cluster.total_events}) is below low-signal threshold (${thresholds.lowSignalEventCount + 1})`;\n  } else if (hasEnoughRevisits || hasEnoughEdits || hasEnoughReopens || hasEnoughDefers) {\n    isValid = true;\n  } else {\n    isValid = false;\n    invalidReason = 'Cluster does not meet minimum thresholds for any loop type (revisit, draft edit, reopen, defer)';\n  }\n}\n\nreturn [\n  {\n    json: {\n      ...data,\n      cluster_is_valid: isValid,\n      cluster_invalid_reason: invalidReason,\n      _debug_stage: 'validate_cluster'\n    }\n  }\n];"
+      },
+      "id": "node_validate_cluster_005",
+      "name": "Validate Cluster",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 400],
+      "notes": "Validates the primary cluster against configured thresholds. Low-signal or empty clusters are marked invalid and short-circuited before reaching the AI node."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.cluster_is_valid}}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "node_if_valid_006",
+      "name": "If Valid",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1340, 400],
+      "notes": "Routes valid clusters to AI analysis. Routes invalid/low-signal clusters to a short-circuit response node."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─────────────────────────────────────────────────────────────────────────────\n// LOW SIGNAL RESPONSE NODE (False branch of If Valid)\n// Returns a structured low-signal response without AI interpretation.\n// ─────────────────────────────────────────────────────────────────────────────\n\nconst data = items[0].json;\n\nconst lowSignalResponse = {\n  loop_summary: 'Insufficient behavioral signal to identify a meaningful loop pattern.',\n  loop_type: 'low_signal_noise',\n  friction_category: 'insufficient_data',\n  severity_level: 'none',\n  estimated_attention_leak: 'negligible',\n  supporting_patterns: [],\n  likely_blocker: null,\n  recommended_intervention: 'Collect more behavioral data across a longer time window before analysis.',\n  recommended_next_step: 'Expand the time window or add more event sources to the payload.',\n  confidence_band: 'low',\n  needs_human_review: false,\n  review_reason: data.cluster_invalid_reason || 'Low signal'\n};\n\nreturn [\n  {\n    json: {\n      _loop_analysis_result: lowSignalResponse,\n      _debug_stage: 'low_signal_short_circuit',\n      _debug_invalid_reason: data.cluster_invalid_reason\n    }\n  }\n];"
+      },
+      "id": "node_low_signal_response_007",
+      "name": "Low Signal Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 560],
+      "notes": "Handles clusters that do not meet minimum thresholds. Returns a structured low-signal response without calling the AI model."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─────────────────────────────────────────────────────────────────────────────\n// PREP LOOP ANALYSIS REQUEST NODE\n// Constructs the system and user prompt messages for the AI loop analysis call.\n// Prompts are loaded from the prompts/ directory and populated with cluster data.\n// In production, load prompt files from disk or a connected storage node.\n// ─────────────────────────────────────────────────────────────────────────────\n\nconst data = items[0].json;\nconst cluster = data.primary_cluster;\nconst config = data._debug_provider_config;\n\n// ── SYSTEM PROMPT ──────────────────────────────────────────────────────────\n// In production: load from prompts/system-loop-analysis.md\nconst systemPrompt = `You are a calm, precise behavioral-friction analyst.\nYour role is to analyze a cluster of repeated digital behavior events and produce a structured JSON diagnostic.\nYou are not a therapist, motivational coach, or productivity advisor.\nYou work strictly from the behavioral signals provided.\nYou do not infer psychological states beyond what the data supports.\nYou do not use encouraging language, affirmations, or emotional framing.\nYou output strict JSON only — no markdown, no prose outside of JSON, no code fences.\nAll string values must be plain text.\n\nExpected output fields:\n- loop_summary: string. One to two sentence factual description of the observed pattern.\n- loop_type: string. One of: reopen_loop, draft_churn_loop, revisit_without_commitment, defer_reopen_cycle, research_spiral, context_switch_drag, low_signal_noise, unresolved_open_loop.\n- friction_category: string. One of: decision_avoidance, unclear_next_action, perfectionism_stall, dependency_block, priority_conflict, context_overload, insufficient_data, other.\n- severity_level: string. One of: none, low, medium, high, critical.\n- estimated_attention_leak: string. One of: negligible, low, moderate, high, severe.\n- supporting_patterns: array of strings. Each entry is a short factual observation from the event data.\n- likely_blocker: string or null. The most probable friction cause based on the signals.\n- recommended_intervention: string. One specific, actionable intervention. Not generic advice.\n- recommended_next_step: string. The single smallest useful move available.\n- confidence_band: string. One of: low, medium, high.\n- needs_human_review: boolean. True if the pattern is ambiguous, contradictory, or outside model competence.\n- review_reason: string or null. Required if needs_human_review is true.`;\n\n// ── USER PROMPT ────────────────────────────────────────────────────────────\n// In production: load from prompts/user-loop-analysis-template.md and interpolate\nconst userPrompt = `Analyze the following repeated behavior cluster and return a JSON diagnostic.\n\nANALYSIS MODE: ${data.analysis_mode}\nTIME WINDOW: ${data.time_window_start} to ${data.time_window_end}\nEVENT COUNT: ${data.event_count}\nPREFERRED TONE: ${data.preferred_tone}\n\nPRIMARY CLUSTER:\n- Repeated Object: ${cluster.object_name}\n- Object Category: ${cluster.object_category}\n- Total Events: ${cluster.total_events}\n- Unique Sessions: ${cluster.unique_sessions}\n- Revisit Count: ${cluster.revisit_count}\n- Draft Edit Count: ${cluster.draft_edit_count}\n- Reopen Count: ${cluster.reopen_count}\n- Defer Count: ${cluster.defer_count}\n- Send Count: ${cluster.send_count}\n- Submit Count: ${cluster.submit_count}\n- Discard Count: ${cluster.discard_count}\n- First Seen: ${cluster.first_seen}\n- Last Seen: ${cluster.last_seen}\n\nEVENT TIMELINE:\n${cluster.event_timeline.join('\\n')}\n\nINSTRUCTIONS:\n- Base your analysis strictly on the signals above.\n- Do not infer facts not supported by the event data.\n- Do not output prose, markdown, or explanation outside of the JSON object.\n- Return a single valid JSON object matching the expected schema.`;\n\nconst requestBody = {\n  model: config.model,\n  max_tokens: config.maxTokens,\n  temperature: config.temperature,\n  messages: [\n    { role: 'system', content: systemPrompt },\n    { role: 'user', content: userPrompt }\n  ]\n};\n\nreturn [\n  {\n    json: {\n      ...data,\n      _debug_ai_request_body: requestBody,\n      _debug_stage: 'prep_loop_analysis_request'\n    }\n  }\n];"
+      },
+      "id": "node_prep_loop_analysis_008",
+      "name": "Prep Loop Analysis Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 300],
+      "notes": "Constructs system and user prompts for single-loop AI analysis. In production, load prompt text from prompts/system-loop-analysis.md and prompts/user-loop-analysis-template.md."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$json._debug_provider_config.apiUrl}}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": []
+        },
+        "specifyBody": "json",
+        "jsonBody": "={{JSON.stringify($json._debug_ai_request_body)}}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": false
+            }
+          }
+        },
+        "retryOnFail": true,
+        "maxTries": 3,
+        "waitBetweenTries": 2000
+      },
+      "id": "node_ai_analyze_loop_009",
+      "name": "AI: Analyze Loop",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1780, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "YOUR_CREDENTIAL_NAME_HERE"
+        }
+      },
+      "notes": "Calls the configured AI provider. Replace credential reference with your own n8n credential. Retries up to 3 times on failure with 2-second wait. See docs/credential-setup.md."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─────────────────────────────────────────────────────────────────────────────\n// PARSE LOOP ANALYSIS NODE\n// Extracts and validates the JSON response from the AI provider.\n// Handles malformed output gracefully by setting needs_human_review = true.\n// ─────────────────────────────────────────────────────────────────────────────\n\nconst aiResponse = items[0].json;\nconst previousData = $('Prep Loop Analysis Request').first().json;\n\nlet parsed = null;\nlet parseError = null;\n\ntry {\n  // Extract the content from the AI response\n  let content = '';\n  if (aiResponse.choices && aiResponse.choices[0] && aiResponse.choices[0].message) {\n    content = aiResponse.choices[0].message.content || '';\n  } else if (aiResponse.content && Array.isArray(aiResponse.content)) {\n    // Anthropic-style response\n    content = aiResponse.content.map(c => c.text || '').join('');\n  } else if (typeof aiResponse === 'string') {\n    content = aiResponse;\n  }\n\n  // Strip code fences if model emitted them despite instructions\n  content = content.replace(/^```(?:json)?\\n?/, '').replace(/\\n?```$/, '').trim();\n\n  parsed = JSON.parse(content);\n\n  // Validate required output fields\n  const requiredFields = [\n    'loop_summary', 'loop_type', 'friction_category', 'severity_level',\n    'estimated_attention_leak', 'supporting_patterns', 'likely_blocker',\n    'recommended_intervention', 'recommended_next_step', 'confidence_band',\n    'needs_human_review'\n  ];\n\n  const missingFields = requiredFields.filter(f => !(f in parsed));\n  if (missingFields.length > 0) {\n    parsed.needs_human_review = true;\n    parsed.review_reason = `Model output missing required fields: ${missingFields.join(', ')}`;\n  }\n\n} catch (err) {\n  parseError = err.message;\n  parsed = {\n    loop_summary: 'Model output could not be parsed as valid JSON.',\n    loop_type: 'unresolved_open_loop',\n    friction_category: 'insufficient_data',\n    severity_level: 'low',\n    estimated_attention_leak: 'low',\n    supporting_patterns: [],\n    likely_blocker: null,\n    recommended_intervention: 'Retry the analysis with a fresh payload or inspect the AI provider response.',\n    recommended_next_step: 'Check AI provider logs for malformed output.',\n    confidence_band: 'low',\n    needs_human_review: true,\n    review_reason: `JSON parse failure: ${parseError}`\n  };\n}\n\nreturn [\n  {\n    json: {\n      ...previousData,\n      _loop_analysis_result: parsed,\n      _debug_ai_raw_response: aiResponse,\n      _debug_parse_error: parseError,\n      _debug_stage: 'parse_loop_analysis'\n    }\n  }\n];"
+      },
+      "id": "node_parse_loop_analysis_010",
+      "name": "Parse Loop Analysis",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2000, 300],
+      "notes": "Parses and validates AI response JSON. Gracefully handles malformed output by flagging needs_human_review. Supports both OpenAI-style and Anthropic-style response formats."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─────────────────────────────────────────────────────────────────────────────\n// DETERMINISTIC FRICTION CHECKS NODE\n// Applies rule-based post-processing to validate and supplement AI output.\n// These checks run after AI interpretation and override or annotate the result\n// where objective signal is stronger than model inference.\n// ─────────────────────────────────────────────────────────────────────────────\n\nconst data = items[0].json;\nconst result = { ...data._loop_analysis_result };\nconst cluster = data.primary_cluster;\nconst thresholds = data._debug_provider_config.thresholds;\n\nconst deterministicFlags = [];\n\n// Rule 1: Escalate severity if revisit_count is very high and send/submit is zero\nif (cluster.revisit_count >= 8 && cluster.send_count === 0 && cluster.submit_count === 0) {\n  if (result.severity_level === 'low' || result.severity_level === 'none') {\n    result.severity_level = 'medium';\n    deterministicFlags.push('SEVERITY_ESCALATED: High revisit count with no closure action detected');\n  }\n}\n\n// Rule 2: Force loop type to draft_churn_loop if draft_edit_count is high and send_count is zero\nif (cluster.draft_edit_count >= thresholds.minDraftEdits && cluster.send_count === 0) {\n  if (result.loop_type !== 'draft_churn_loop') {\n    deterministicFlags.push(`LOOP_TYPE_CORRECTED: draft_edit_count=${cluster.draft_edit_count}, send_count=0 is definitionally draft_churn_loop`);\n    result.loop_type = 'draft_churn_loop';\n  }\n}\n\n// Rule 3: Flag defer_reopen_cycle if defer_count and revisit_count both exceed threshold\nif (cluster.defer_count >= thresholds.minDeferCount && cluster.revisit_count >= thresholds.minRevisitCount) {\n  if (result.loop_type !== 'defer_reopen_cycle') {\n    deterministicFlags.push(`LOOP_TYPE_CANDIDATE: defer_count=${cluster.defer_count} and revisit_count=${cluster.revisit_count} match defer_reopen_cycle pattern`);\n  }\n}\n\n// Rule 4: Downgrade confidence if total_events is below 4\nif (cluster.total_events < 4 && result.confidence_band === 'high') {\n  result.confidence_band = 'medium';\n  deterministicFlags.push('CONFIDENCE_DOWNGRADED: Total events below 4 — high confidence not warranted');\n}\n\n// Rule 5: Flag for human review if severity is critical\nif (result.severity_level === 'critical' && !result.needs_human_review) {\n  result.needs_human_review = true;\n  result.review_reason = 'Critical severity flagged — human review recommended before acting on this result';\n  deterministicFlags.push('HUMAN_REVIEW_FLAGGED: Critical severity threshold triggered');\n}\n\nreturn [\n  {\n    json: {\n      ...data,\n      _loop_analysis_result: result,\n      _debug_deterministic_flags: deterministicFlags,\n      _debug_stage: 'deterministic_friction_checks'\n    }\n  }\n];"
+      },
+      "id": "node_deterministic_checks_011",
+      "name": "Deterministic Friction Checks",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2220, 300],
+      "notes": "Rule-based post-processing layer. Applies objective overrides on top of AI output: severity escalation, loop type correction, confidence downgrade, and human review flagging. Runs regardless of AI output quality."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─────────────────────────────────────────────────────────────────────────────\n// HUMAN REVIEW OVERRIDE NODE\n// If needs_human_review is true, this node logs the flag and passes the result\n// through with human_review_pending = true.\n// In production: connect to a notification node (Slack, email, webhook) here.\n// ─────────────────────────────────────────────────────────────────────────────\n\nconst data = items[0].json;\nconst result = data._loop_analysis_result;\n\nconst reviewPending = result.needs_human_review === true;\n\n// In production: if reviewPending, trigger a notification to the review system.\n// Example: connect an HTTP Request node to your Slack webhook or email endpoint.\n\nreturn [\n  {\n    json: {\n      ...data,\n      _debug_human_review_pending: reviewPending,\n      _debug_human_review_reason: result.review_reason || null,\n      _debug_stage: 'human_review_override'\n    }\n  }\n];"
+      },
+      "id": "node_human_review_012",
+      "name": "Human Review Override",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2440, 300],
+      "notes": "Handles human review routing. In production: add a notification node (Slack, email, webhook) after this node when _debug_human_review_pending is true. Currently passes through without blocking."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json.analysis_mode}}",
+              "operation": "equals",
+              "value2": "weekly_review"
+            }
+          ]
+        }
+      },
+      "id": "node_if_weekly_013",
+      "name": "If Weekly Review",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [2660, 300],
+      "notes": "Routes to weekly pattern review if analysis_mode is 'weekly_review'. Otherwise routes directly to final response."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─────────────────────────────────────────────────────────────────────────────\n// PREP WEEKLY PATTERN REVIEW NODE\n// Constructs the system and user prompts for the weekly review call.\n// Expects all_clusters to contain multiple analyzed loop results.\n// In production: load prompt text from prompts/system-weekly-pattern-review.md\n// ─────────────────────────────────────────────────────────────────────────────\n\nconst data = items[0].json;\nconst config = data._debug_provider_config;\nconst clusters = data.all_clusters || [];\nconst singleResult = data._loop_analysis_result;\n\n// Build a JSON summary of loop results for the weekly prompt\nconst loopResultsSummary = JSON.stringify([\n  singleResult,\n  ...clusters.slice(1).map(c => ({\n    object_name: c.object_name,\n    object_category: c.object_category,\n    total_events: c.total_events,\n    revisit_count: c.revisit_count,\n    draft_edit_count: c.draft_edit_count,\n    defer_count: c.defer_count\n  }))\n], null, 2);\n\nconst weeklySystemPrompt = `You are a behavioral-friction pattern analyst reviewing a week of loop-analysis results.\nYour role is to identify systemic patterns across multiple loop results and produce a structured weekly diagnostic.\nYou are not a therapist, coach, or advisor.\nYou work strictly from the loop-analysis outputs provided.\nYou do not infer patterns not supported by the data.\nYou output strict JSON only — no markdown, no prose outside JSON, no code fences.\n\nExpected output fields:\n- review_summary: string.\n- top_loop_leaks: array of objects with object_name and loop_type.\n- repeated_friction_categories: array of strings.\n- recurring_blockers: array of strings.\n- quick_closure_opportunities: array of strings.\n- highest_severity_patterns: array of strings.\n- next_week_interventions: array of strings.\n- confidence_band: string. One of: low, medium, high.\n- needs_human_review: boolean.\n- review_reason: string or null.`;\n\nconst weeklyUserPrompt = `Analyze the following loop-analysis results from the past week and return a structured weekly pattern review.\n\nTIME WINDOW: ${data.time_window_start} to ${data.time_window_end}\nUSER: ${data.user_id}\nTOTAL CLUSTERS ANALYZED: ${clusters.length}\n\nLOOP ANALYSIS RESULTS:\n${loopResultsSummary}\n\nINSTRUCTIONS:\n- Identify patterns that appear across multiple loop results.\n- Do not hallucinate patterns not present in the data.\n- Return a single valid JSON object only.`;\n\nconst weeklyRequestBody = {\n  model: config.model,\n  max_tokens: config.maxTokens,\n  temperature: 0.2,\n  messages: [\n    { role: 'system', content: weeklySystemPrompt },\n    { role: 'user', content: weeklyUserPrompt }\n  ]\n};\n\nreturn [\n  {\n    json: {\n      ...data,\n      _debug_weekly_request_body: weeklyRequestBody,\n      _debug_stage: 'prep_weekly_pattern_review'\n    }\n  }\n];"
+      },
+      "id": "node_prep_weekly_014",
+      "name": "Prep Weekly Pattern Review",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2880, 200],
+      "notes": "Constructs prompts for the weekly pattern review call. In production, load prompt text from prompts/system-weekly-pattern-review.md and prompts/user-weekly-pattern-review-template.md."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$json._debug_provider_config.apiUrl}}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{JSON.stringify($json._debug_weekly_request_body)}}",
+        "options": {},
+        "retryOnFail": true,
+        "maxTries": 3,
+        "waitBetweenTries": 2000
+      },
+      "id": "node_ai_weekly_015",
+      "name": "AI: Weekly Pattern Review",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [3100, 200],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "YOUR_CREDENTIAL_NAME_HERE"
+        }
+      },
+      "notes": "AI call for weekly pattern review. Uses the same credential as the single-loop analysis node. Retries up to 3 times."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─────────────────────────────────────────────────────────────────────────────\n// PARSE WEEKLY PATTERN REVIEW NODE\n// Extracts and validates the JSON weekly review from the AI provider.\n// ─────────────────────────────────────────────────────────────────────────────\n\nconst aiResponse = items[0].json;\nconst previousData = $('Prep Weekly Pattern Review').first().json;\n\nlet parsed = null;\nlet parseError = null;\n\ntry {\n  let content = '';\n  if (aiResponse.choices && aiResponse.choices[0] && aiResponse.choices[0].message) {\n    content = aiResponse.choices[0].message.content || '';\n  } else if (aiResponse.content && Array.isArray(aiResponse.content)) {\n    content = aiResponse.content.map(c => c.text || '').join('');\n  }\n  content = content.replace(/^```(?:json)?\\n?/, '').replace(/\\n?```$/, '').trim();\n  parsed = JSON.parse(content);\n} catch (err) {\n  parseError = err.message;\n  parsed = {\n    review_summary: 'Weekly review output could not be parsed.',\n    top_loop_leaks: [],\n    repeated_friction_categories: [],\n    recurring_blockers: [],\n    quick_closure_opportunities: [],\n    highest_severity_patterns: [],\n    next_week_interventions: [],\n    confidence_band: 'low',\n    needs_human_review: true,\n    review_reason: `JSON parse failure: ${parseError}`\n  };\n}\n\nreturn [\n  {\n    json: {\n      ...previousData,\n      _weekly_review_result: parsed,\n      _debug_weekly_parse_error: parseError,\n      _debug_stage: 'parse_weekly_pattern_review'\n    }\n  }\n];"
+      },
+      "id": "node_parse_weekly_016",
+      "name": "Parse Weekly Pattern Review",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3320, 200],
+      "notes": "Parses weekly review AI response. Handles malformed output gracefully."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─────────────────────────────────────────────────────────────────────────────\n// FINAL RESPONSE NODE\n// Assembles the clean public output.\n// Strips all internal _debug_ fields before sending the response.\n// Merges single-loop and optional weekly review results.\n// ─────────────────────────────────────────────────────────────────────────────\n\nconst data = items[0].json;\n\n// Extract clean results (no _debug_ fields)\nconst loopResult = data._loop_analysis_result || {};\nconst weeklyResult = data._weekly_review_result || null;\n\n// Build the clean public response\nconst publicResponse = {\n  status: 'success',\n  analysis_mode: data.analysis_mode,\n  user_id: data.user_id,\n  time_window_start: data.time_window_start,\n  time_window_end: data.time_window_end,\n  loop_analysis: {\n    loop_summary: loopResult.loop_summary,\n    loop_type: loopResult.loop_type,\n    friction_category: loopResult.friction_category,\n    severity_level: loopResult.severity_level,\n    estimated_attention_leak: loopResult.estimated_attention_leak,\n    supporting_patterns: loopResult.supporting_patterns || [],\n    likely_blocker: loopResult.likely_blocker || null,\n    recommended_intervention: loopResult.recommended_intervention,\n    recommended_next_step: loopResult.recommended_next_step,\n    confidence_band: loopResult.confidence_band,\n    needs_human_review: loopResult.needs_human_review || false,\n    review_reason: loopResult.review_reason || null\n  }\n};\n\nif (weeklyResult) {\n  publicResponse.weekly_review = {\n    review_summary: weeklyResult.review_summary,\n    top_loop_leaks: weeklyResult.top_loop_leaks || [],\n    repeated_friction_categories: weeklyResult.repeated_friction_categories || [],\n    recurring_blockers: weeklyResult.recurring_blockers || [],\n    quick_closure_opportunities: weeklyResult.quick_closure_opportunities || [],\n    highest_severity_patterns: weeklyResult.highest_severity_patterns || [],\n    next_week_interventions: weeklyResult.next_week_interventions || [],\n    confidence_band: weeklyResult.confidence_band,\n    needs_human_review: weeklyResult.needs_human_review || false,\n    review_reason: weeklyResult.review_reason || null\n  };\n}\n\nreturn [\n  {\n    json: publicResponse\n  }\n];"
+      },
+      "id": "node_final_response_017",
+      "name": "Final Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3540, 300],
+      "notes": "Assembles the clean public response. All _debug_ fields are stripped here. Only fields defined in the output schema are included in the final response."
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{JSON.stringify($json)}}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "node_respond_webhook_018",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [3760, 300],
+      "notes": "Returns the final clean JSON response to the caller. HTTP 200 on success."
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Provider Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Provider Config": {
+      "main": [
+        [
+          {
+            "node": "Normalize Events",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Events": {
+      "main": [
+        [
+          {
+            "node": "Cluster Repeated Behavior",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cluster Repeated Behavior": {
+      "main": [
+        [
+          {
+            "node": "Validate Cluster",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Cluster": {
+      "main": [
+        [
+          {
+            "node": "If Valid",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Valid": {
+      "main": [
+        [
+          {
+            "node": "Prep Loop Analysis Request",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Low Signal Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Low Signal Response": {
+      "main": [
+        [
+          {
+            "node": "Final Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prep Loop Analysis Request": {
+      "main": [
+        [
+          {
+            "node": "AI: Analyze Loop",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI: Analyze Loop": {
+      "main": [
+        [
+          {
+            "node": "Parse Loop Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Loop Analysis": {
+      "main": [
+        [
+          {
+            "node": "Deterministic Friction Checks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Deterministic Friction Checks": {
+      "main": [
+        [
+          {
+            "node": "Human Review Override",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Human Review Override": {
+      "main": [
+        [
+          {
+            "node": "If Weekly Review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Weekly Review": {
+      "main": [
+        [
+          {
+            "node": "Prep Weekly Pattern Review",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Final Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prep Weekly Pattern Review": {
+      "main": [
+        [
+          {
+            "node": "AI: Weekly Pattern Review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI: Weekly Pattern Review": {
+      "main": [
+        [
+          {
+            "node": "Parse Weekly Pattern Review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Weekly Pattern Review": {
+      "main": [
+        [
+          {
+            "node": "Final Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Final Response": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "createdAt": "2025-01-01T00:00:00.000Z",
+      "updatedAt": "2025-01-01T00:00:00.000Z",
+      "id": "tag_loop_leak_detector",
+      "name": "loop-leak-detector"
+    },
+    {
+      "createdAt": "2025-01-01T00:00:00.000Z",
+      "updatedAt": "2025-01-01T00:00:00.000Z",
+      "id": "tag_behavioral_analytics",
+      "name": "behavioral-analytics"
+    },
+    {
+      "createdAt": "2025-01-01T00:00:00.000Z",
+      "updatedAt": "2025-01-01T00:00:00.000Z",
+      "id": "tag_automation_template",
+      "name": "automation-template"
+    }
+  ],
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "instanceId": "REPLACE_WITH_YOUR_INSTANCE_ID"
+  },
+  "id": "loop-leak-detector-automation-v1",
+  "versionId": "1.0.0"
+}
